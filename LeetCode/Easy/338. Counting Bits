@@ -1,0 +1,23 @@
+/**
+ * Note: The returned array must be malloced, assume caller calls free().
+ */
+int* countBits(int n, int* returnSize) {
+    *returnSize = n+1;
+    int* arr = (int*)malloc((*returnSize) * sizeof(int));
+    if (arr == NULL){
+        return NULL;
+    }
+    for(int i = 0;i<=n;i++){
+        int t = i;
+        int rem,count = 0;
+        while(t != 0){
+            rem = t % 2;
+            if(rem == 1){
+                count++;
+            }
+            t = t / 2;
+        }
+        arr[i] = count;
+    }
+    return arr;
+}
