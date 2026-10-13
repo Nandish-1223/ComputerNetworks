@@ -1,0 +1,193 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+
+#define PORT 5063
+#define SIZE 1024
+
+void chat_mode(int s, struct sockaddr_in *addr, socklen_t len) {
+    char b[SIZE];
+    int n, running = 1;
+    fd_set readfds;
+
+    n = recvfrom(s, b, SIZE - 1, 0, NULL, NULL);
+    if (n <= 0) {
+        printf("Server did not start chat.\n");
+        return;
+    }
+    b[n] = '\0';
+
+    if (strcmp(b, "CHAT_START") != 0) {
+        printf("Unexpected response: %s\n", b);
+        return;
+    }
+
+    printf("\n--- Full Duplex Chat Started ---\n");
+    printf("Type EXIT to quit chat.\n\n");
+    printf("Client> ");
+    fflush(stdout);
+
+    while (running) {
+        FD_ZERO(&readfds);
+        FD_SET(STDIN_FILENO, &readfds);
+        FD_SET(s, &readfds);
+
+        if (select(s + 1, &readfds, NULL, NULL, NULL) < 0) {
+            perror("select");
+            break;
+        }
+
+        if (FD_ISSET(s, &readfds)) {
+            n = recvfrom(s, b, SIZE - 1, 0, NULL, NULL);
+            if (n <= 0)
+                continue;
+
+            b[n] = '\0';
+            printf("\r\033[K");
+
+            if (strcmp(b, "EXIT") == 0) {
+                printf("Server left the chat.\n");
+                running = 0;
+            } else {
+                printf("Server: %s\nClient> ", b);
+                fflush(stdout);
+            }
+        }
+
+        if (running && FD_ISSET(STDIN_FILENO, &readfds)) {
+            if (!fgets(b, sizeof(b), stdin))
+                strcpy(b, "EXIT");
+            else
+                b[strcspn(b, "\n")] = '\0';
+
+            if (b[0] == '\0') {
+                printf("Client> ");
+                fflush(stdout);
+                continue;
+            }
+
+            if (sendto(s, b, strlen(b), 0, (struct sockaddr *)addr, len) < 0) {
+                perror("sendto");
+                break;
+            }
+
+            if (strcmp(b, "EXIT") == 0) {
+                printf("You left the chat.\n");
+                running = 0;
+            } else {
+                printf("Client> ");
+                fflush(stdout);
+            }
+        }
+    }
+}
+
+void arp_mode(int s, struct sockaddr_in *addr, socklen_t len) {
+    char ip[SIZE], mac[SIZE];
+    int n;
+
+    n = recvfrom(s, mac, SIZE - 1, 0, NULL, NULL);
+    if (n <= 0) {
+        printf("Server did not respond.\n");
+        return;
+    }
+    mac[n] = '\0';
+
+    if (strcmp(mac, "SEND_IP") != 0) {
+        printf("Unexpected response: %s\n", mac);
+        return;
+    }
+
+    printf("Enter IP address: ");
+    fflush(stdout);
+    if (!fgets(ip, sizeof(ip), stdin)) {
+        printf("Error reading IP.\n");
+        return;
+    }
+    ip[strcspn(ip, "\n")] = '\0';
+
+    if (sendto(s, ip, strlen(ip), 0, (struct sockaddr *)addr, len) < 0) {
+        perror("sendto");
+        return;
+    }
+
+    n = recvfrom(s, mac, SIZE - 1, 0, NULL, NULL);
+    if (n <= 0) {
+        printf("Server did not respond with MAC.\n");
+        return;
+    }
+    mac[n] = '\0';
+
+    printf("MAC Address for %s : %s\n", ip, mac);
+}
+
+int main(void) {
+    int s, choice, n;
+    char b[SIZE];
+    struct sockaddr_in addr = {0};
+    socklen_t len = sizeof(addr);
+
+    s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) {
+        perror("socket");
+        return 1;
+    }
+
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(PORT);
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    while (1) {
+        printf("\n========== MENU ==========\n");
+        printf("1. Full Duplex Chat\n");
+        printf("2. ARP Resolution\n");
+        printf("3. Exit\n");
+        printf("==========================\n");
+        printf("Enter choice: ");
+        fflush(stdout);
+
+        if (scanf("%d", &choice) != 1) {
+            while (getchar() != '\n');
+            printf("Invalid input. Try again.\n");
+            continue;
+        }
+        while (getchar() != '\n');
+
+        if (choice == 1) {
+            strcpy(b, "1");
+        } else if (choice == 2) {
+            strcpy(b, "2");
+        } else if (choice == 3) {
+            strcpy(b, "3");
+        } else {
+            printf("Invalid choice.\n");
+            continue;
+        }
+
+        if (sendto(s, b, strlen(b), 0, (struct sockaddr *)&addr, len) < 0) {
+            perror("sendto");
+            continue;
+        }
+
+        if (choice == 1) {
+            chat_mode(s, &addr, len);
+        } else if (choice == 2) {
+            arp_mode(s, &addr, len);
+        } else if (choice == 3) {
+            n = recvfrom(s, b, SIZE - 1, 0, NULL, NULL);
+            if (n > 0) {
+                b[n] = '\0';
+                printf("Server: %s\n", b);
+            }
+            printf("Exiting...\n");
+            break;
+        }
+    }
+
+    close(s);
+    return 0;
+}
