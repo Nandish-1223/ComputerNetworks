@@ -1,0 +1,426 @@
+[24bcs061@mepcolinux ex6]$cat ex6.prn 
+Script started on Mon Oct 12 12:14:21 2026
+[24bcs061@mepcolinux ex6]$cat client.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <signal.h>
+#include <termios.h>
+#include <arpa/inet.h>
+
+#define PORT 5556
+#define BUFFER_SIZE 1024
+
+/* Restore terminal settings before exit */
+struct termios orig_tio;
+void restore_terminal(void) {
+    tcsetattr(STDIN_FILENO, TCSANOW, &orig_tio);
+}
+
+int main(int argc, char *argv[]) {
+    int sock;
+    struct sockaddr_in serv_addr;
+    char buffer[BUFFER_SIZE];
+
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <server_ip>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    /* 1. Create TCP socket */
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        perror("socket failed");
+        exit(EXIT_FAILURE);
+    }
+
+    /* 2. Configure server address */
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(PORT);
+
+    if (inet_pton(AF_INET, argv[1], &serv_addr.sin_addr) <= 0) {
+        perror("Invalid IP");
+        exit(EXIT_FAILURE);
+    }
+
+    /* 3. Connect to the remote server */
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        perror("connect failed");
+        close(sock);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Connected to %s:%d\n", argv[1], PORT);
+
+    /* Fork so we can read from server and keyboard at the same time */
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork failed");
+        exit(EXIT_FAILURE);
+    }
+
+    if (pid == 0) {
+        /* Child: receive messages from server and print them */
+        int n;
+        while ((n = recv(sock, buffer, BUFFER_SIZE - 1, 0)) > 0) {
+            buffer[n] = '\0';
+            printf("%s", buffer);
+            fflush(stdout);
+        }
+        if (n == 0) {
+            printf("\nServer closed connection\n");
+        } else {
+            perror("recv failed");
+        }
+        kill(getppid(), SIGTERM);
+        exit(0);
+    } else {
+        /* Parent: read from keyboard and send to server */
+
+        /* --- Username (normal echo) --- */
+        if (fgets(buffer, BUFFER_SIZE, stdin) == NULL) {
+            printf("Disconnecting...\n");
+            kill(pid, SIGTERM);
+            close(sock);
+            return 0;
+        }
+        if (send(sock, buffer, strlen(buffer), 0) < 0) {
+            perror("send failed");
+            kill(pid, SIGTERM);
+            close(sock);
+            return 0;
+        }
+
+        /* --- Password (hide typing) --- */
+        tcgetattr(STDIN_FILENO, &orig_tio);
+        struct termios new_tio = orig_tio;
+        new_tio.c_lflag &= ~ECHO;               /* disable echo */
+        tcsetattr(STDIN_FILENO, TCSANOW, &new_tio);
+
+        if (fgets(buffer, BUFFER_SIZE, stdin) == NULL) {
+            restore_terminal();
+            printf("\nDisconnecting...\n");
+            kill(pid, SIGTERM);
+            close(sock);
+            return 0;
+        }
+
+        restore_terminal();
+        printf("\n");                            /* move to next line after hidden input */
+        fflush(stdout);
+
+        if (send(sock, buffer, strlen(buffer), 0) < 0) {
+            perror("send failed");
+            kill(pid, SIGTERM);
+            close(sock);
+            return 0;
+        }
+
+        /* --- General loop for menu and all other inputs --- */
+        while (fgets(buffer, BUFFER_SIZE, stdin) != NULL) {
+            if (send(sock, buffer, strlen(buffer), 0) < 0) {
+                perror("send failed");
+                break;
+            }
+        }
+        printf("Disconnecting...\n");
+        kill(pid, SIGTERM);
+    }
+
+    close(sock);
+    return 0;
+}
+[24bcs061@mepcolinux ex6]$cat server.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+
+#define PORT 5556
+#define MAX_USERS 10
+#define BUFFER_SIZE 1024
+
+/* User record structure */
+typedef struct {
+    char username[50];
+    char password[50];
+} User;
+
+/* Load username/password pairs from a text file */
+int load_users(const char *filename, User users[]) {
+    FILE *fp = fopen(filename, "r");
+    if (!fp) {
+        perror("open users.txt");
+        exit(EXIT_FAILURE);
+    }
+
+    int count = 0;
+    char line[128];
+    while (fgets(line, sizeof(line), fp) && count < MAX_USERS) {
+        line[strcspn(line, "\r\n")] = '\0';   /* remove newline */
+
+        char *u = strtok(line, ",");
+        char *p = strtok(NULL, ",");
+        if (u && p) {
+            strncpy(users[count].username, u, sizeof(users[count].username) - 1);
+            strncpy(users[count].password, p, sizeof(users[count].password) - 1);
+            users[count].username[sizeof(users[count].username) - 1] = '\0';
+            users[count].password[sizeof(users[count].password) - 1] = '\0';
+            count++;
+        }
+    }
+    fclose(fp);
+    return count;
+}
+
+/* Verify username and password */
+int authenticate(User users[], int count, const char *username, const char *password) {
+    for (int i = 0; i < count; i++) {
+        if (strcmp(users[i].username, username) == 0 &&
+            strcmp(users[i].password, password) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Check if a string is a palindrome */
+int is_palindrome(const char *str) {
+    int len = strlen(str);
+    if (len == 0) return 0;
+    for (int i = 0; i < len / 2; i++) {
+        if (str[i] != str[len - 1 - i])
+            return 0;
+    }
+    return 1;
+}
+
+/* Send a null-terminated string over the socket */
+void send_msg(int sock, const char *msg) {
+    send(sock, msg, strlen(msg), 0);
+}
+
+/* Read one line (until \n) from the socket */
+int recv_line(int sock, char *buf, int max_len) {
+    int i = 0;
+    char ch;
+    while (i < max_len - 1) {
+        int n = recv(sock, &ch, 1, 0);
+        if (n <= 0) return -1;          /* error or disconnect */
+        if (ch == '\n') break;          /* end of line */
+        if (ch != '\r')
+            buf[i++] = ch;
+    }
+    buf[i] = '\0';
+    return i;
+}
+
+/* Handle one client connection after accept() */
+void handle_client(int client_sock, User users[], int count) {
+    char username[BUFFER_SIZE];
+    char password[BUFFER_SIZE];
+    char buf[BUFFER_SIZE];
+
+    /* ---- Authentication ---- */
+    send_msg(client_sock, "Username: \n");
+    if (recv_line(client_sock, username, BUFFER_SIZE) < 0) return;
+
+    send_msg(client_sock, "Password: \n");
+    if (recv_line(client_sock, password, BUFFER_SIZE) < 0) return;
+
+    if (authenticate(users, count, username, password)) {
+        send_msg(client_sock, "AUTH_SUCCESS\n");
+        printf("User %s logged in\n", username);
+    } else {
+        send_msg(client_sock, "AUTH_FAIL\n");
+        printf("Login failed for %s\n", username);
+        return;
+    }
+
+    /* ---- Post-auth menu ---- */
+    while (1) {
+        char menu[256];
+        snprintf(menu, sizeof(menu),
+                 "Menu\n1. Echo\n2. Palindrome\n3. Exit\nChoice: \n");
+        send_msg(client_sock, menu);
+
+        if (recv_line(client_sock, buf, BUFFER_SIZE) < 0) break;
+
+        printf("%s chose %s\n", username, buf);
+
+        if (strcmp(buf, "1") == 0) {
+            send_msg(client_sock, "Enter text: \n");
+            if (recv_line(client_sock, buf, BUFFER_SIZE) < 0) break;
+
+            printf("Echo from %s: %s\n", username, buf);
+
+            char reply[BUFFER_SIZE + 20];
+            snprintf(reply, sizeof(reply), "Echo: %s\n", buf);
+            send_msg(client_sock, reply);
+
+            printf("Echo sent to %s\n", username);
+        }
+        else if (strcmp(buf, "2") == 0) {
+            send_msg(client_sock, "Enter text: \n");
+            if (recv_line(client_sock, buf, BUFFER_SIZE) < 0) break;
+
+            printf("Palindrome from %s: %s\n", username, buf);
+
+            if (is_palindrome(buf)) {
+                send_msg(client_sock, "Result: Palindrome\n");
+                printf("Result for %s: Palindrome\n", username);
+            } else {
+                send_msg(client_sock, "Result: Not a palindrome\n");
+                printf("Result for %s: Not a palindrome\n", username);
+            }
+        }
+        else if (strcmp(buf, "3") == 0) {
+            send_msg(client_sock, "Goodbye\n");
+            printf("User %s disconnected\n", username);
+            break;
+        }
+        else {
+            send_msg(client_sock, "Invalid choice\n");
+            printf("Invalid choice from %s: %s\n", username, buf);
+        }
+    }
+}
+
+int main() {
+    User users[MAX_USERS];
+    int user_count = load_users("users.txt", users);
+    printf("Loaded %d users\n", user_count);
+
+    int server_fd, client_sock;
+    struct sockaddr_in address;
+    socklen_t addrlen = sizeof(address);
+
+    /* 1. socket()  - create TCP socket */
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        perror("socket failed");
+        exit(EXIT_FAILURE);
+    }
+    printf("Socket created\n");
+
+    /* Allow reuse of address so you can restart quickly */
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;   /* 0.0.0.0 */
+    address.sin_port = htons(PORT);
+
+    /* 2. bind() - assign address to socket */
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        perror("bind failed");
+        close(server_fd);
+        exit(EXIT_FAILURE);
+    }
+    printf("Bind done on port %d\n", PORT);
+
+    /* 3. listen() - mark socket as passive, accept up to 5 pending connections */
+    if (listen(server_fd, 5) < 0) {
+        perror("listen failed");
+        close(server_fd);
+        exit(EXIT_FAILURE);
+    }
+    printf("Listen active\n");
+    printf("Server waiting on port %d\n\n", PORT);
+
+    while (1) {
+        /* 4. accept() - block until a client connects */
+        client_sock = accept(server_fd, (struct sockaddr *)&address, &addrlen);
+        if (client_sock < 0) {
+            perror("accept failed");
+            continue;
+        }
+        printf("Client connected\n");
+
+        handle_client(client_sock, users, user_count);
+
+        close(client_sock);
+        printf("Client disconnected\n\n");
+    }
+
+    close(server_fd);
+    return 0;
+}
+[24bcs061@mepcolinux ex6]$cat users.txt
+nandish,nandish@123
+soorya,soorya@123
+praveen,praveen@123
+[24bcs061@mepcolinux ex6]$cat output
+[24bcs061@mepcolinux ex6]$./server
+Loaded 3 users
+Socket created
+Bind done on port 5556
+Listen active
+Server waiting on port 5556
+
+Client connected
+User nandish logged in
+nandish chose 1
+Echo from nandish: hello
+Echo sent to nandish
+nandish chose 2
+Palindrome from nandish: malayalam
+Result for nandish: Palindrome
+nandish chose 2
+Palindrome from nandish: praveen
+Result for nandish: Not a palindrome
+nandish chose 3
+User nandish disconnected
+Client disconnected
+
+^C
+[24bcs061@mepcolinux ex6]$./client 127.0.0.1
+Connected to 127.0.0.1:5556
+Username:
+nandish
+Password:
+
+AUTH_SUCCESS
+Menu
+1. Echo
+2. Palindrome
+3. Exit
+Choice:
+1
+Enter text:
+hello
+Echo: hello
+Menu
+1. Echo
+2. Palindrome
+3. Exit
+Choice:
+2
+Enter text:
+malayalam
+Result: Palindrome
+Menu
+1. Echo
+2. Palindrome
+3. Exit
+Choice:
+2
+Enter text:
+praveen
+Result: Not a palindrome
+Menu
+1. Echo
+2. Palindrome
+3. Exit
+Choice:
+3
+Goodbye
+
+Server closed connection
+Terminated(
+[24bcs061@mepcolinux ex6]$exit
+exit
+
+Script done on Mon Oct 12 12:14:56 2026
+[24bcs061@mepcolinux ex6]$
